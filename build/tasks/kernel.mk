@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 # Android makefile to build kernel as a part of Android Build
 #
 # Configuration
@@ -34,7 +33,7 @@
 #
 #   TARGET_KERNEL_CLANG_COMPILE        = Compile kernel with clang, defaults to false
 #
-#   TARGET_KERNEL_CLANG_VERSION        = Clang prebuilts version, optional, defaults to clang-stable
+#   TARGET_KERNEL_CLANG_VERSION        = Clang prebuilts version, optional, defaults to 4.0
 #
 #   TARGET_KERNEL_CLANG_PATH           = Clang prebuilts path, optional
 #
@@ -65,15 +64,9 @@
 #   USE_CCACHE                         = Enable ccache (global Android flag)
 #
 #   NEED_KERNEL_MODULE_ROOT            = Optional, if true, install kernel
-#                                          modules in root instead of vendor
-#   NEED_KERNEL_MODULE_SYSTEM          = Optional, if true, install kernel
-#                                          modules in system instead of vendor
-
-
-ifneq ($(TARGET_NO_KERNEL),true)
+#                                          modules in root instead of system
 
 TARGET_AUTO_KDIR := $(shell echo $(TARGET_DEVICE_DIR) | sed -e 's/^device/kernel/g')
-
 ## Externally influenced variables
 # kernel location - optional, defaults to kernel/<vendor>/<device>
 TARGET_KERNEL_SOURCE ?= $(TARGET_AUTO_KDIR)
@@ -93,7 +86,6 @@ KERNEL_ARCH := $(TARGET_ARCH)
 else
 KERNEL_ARCH := $(TARGET_KERNEL_ARCH)
 endif
-KERNEL_DEFCONFIG_SRC := $(KERNEL_SRC)/arch/$(KERNEL_ARCH)/configs/$(KERNEL_DEFCONFIG)
 
 ifeq ($(KERNEL_ARCH),x86_64)
 KERNEL_DEFCONFIG_ARCH := x86
@@ -102,18 +94,45 @@ KERNEL_DEFCONFIG_ARCH := $(KERNEL_ARCH)
 endif
 KERNEL_DEFCONFIG_SRC := $(KERNEL_SRC)/arch/$(KERNEL_DEFCONFIG_ARCH)/configs/$(KERNEL_DEFCONFIG)
 
-ifneq ($(TARGET_PREBUILT_KERNEL),)
-    ifeq ($(BOARD_KERNEL_IMAGE_NAME),)
-    $(error BOARD_KERNEL_IMAGE_NAME not defined.)
-    endif
+TARGET_KERNEL_HEADER_ARCH := $(strip $(TARGET_KERNEL_HEADER_ARCH))
+ifeq ($(TARGET_KERNEL_HEADER_ARCH),)
+KERNEL_HEADER_ARCH := $(KERNEL_ARCH)
+else
+KERNEL_HEADER_ARCH := $(TARGET_KERNEL_HEADER_ARCH)
 endif
+
+KERNEL_HEADER_DEFCONFIG := $(strip $(KERNEL_HEADER_DEFCONFIG))
+ifeq ($(KERNEL_HEADER_DEFCONFIG),)
+KERNEL_HEADER_DEFCONFIG := $(KERNEL_DEFCONFIG)
+endif
+
+
+ifneq ($(BOARD_KERNEL_IMAGE_NAME),)
+  TARGET_PREBUILT_INT_KERNEL_TYPE := $(BOARD_KERNEL_IMAGE_NAME)
+else
+  ifeq ($(TARGET_USES_UNCOMPRESSED_KERNEL),true)
+    TARGET_PREBUILT_INT_KERNEL_TYPE := Image
+  else
+    ifeq ($(TARGET_KERNEL_ARCH),arm64)
+      TARGET_PREBUILT_INT_KERNEL_TYPE := Image.gz
+    else
+      TARGET_PREBUILT_INT_KERNEL_TYPE := zImage
+    endif
+  endif
+endif
+
+ifeq ($(BOARD_KERNEL_IMAGE_NAME),)
+$(error BOARD_KERNEL_IMAGE_NAME not defined.)
+endif
+
 ifneq ($(TARGET_USES_UNCOMPRESSED_KERNEL),)
 $(error TARGET_USES_UNCOMPRESSED_KERNEL is deprecated.)
 endif
 ifneq ($(TARGET_KERNEL_APPEND_DTB),)
 $(error TARGET_KERNEL_APPEND_DTB is deprecated.)
 endif
-TARGET_PREBUILT_INT_KERNEL := $(KERNEL_OUT)/arch/$(KERNEL_ARCH)/boot/$(BOARD_KERNEL_IMAGE_NAME)
+
+TARGET_PREBUILT_INT_KERNEL := $(KERNEL_OUT)/arch/$(KERNEL_ARCH)/boot/$(TARGET_PREBUILT_INT_KERNEL_TYPE)
 
 # Clear this first to prevent accidental poisoning from env
 MAKE_FLAGS :=
@@ -122,10 +141,12 @@ ifeq ($(KERNEL_ARCH),arm)
   # Avoid "Unknown symbol _GLOBAL_OFFSET_TABLE_" errors
   MAKE_FLAGS += CFLAGS_MODULE="-fno-pic"
 endif
-
 ifeq ($(KERNEL_ARCH),arm64)
   # Avoid "unsupported RELA relocation: 311" errors (R_AARCH64_ADR_GOT_PAGE)
   MAKE_FLAGS += CFLAGS_MODULE="-fno-pic"
+  ifeq ($(TARGET_ARCH),arm)
+    KERNEL_CONFIG_OVERRIDE := CONFIG_ANDROID_BINDER_IPC_32BIT=y
+  endif
 endif
 
 ifneq ($(TARGET_KERNEL_ADDITIONAL_CONFIG),)
@@ -137,6 +158,16 @@ KERNEL_ADDITIONAL_CONFIG_SRC := $(KERNEL_SRC)/arch/$(KERNEL_ARCH)/configs/$(KERN
     endif
 else
     KERNEL_ADDITIONAL_CONFIG_SRC := /dev/null
+endif
+
+## Do be discontinued in a future version. Notify builder about target
+## kernel format requirement
+ifeq ($(BOARD_KERNEL_IMAGE_NAME),)
+ifeq ($(BOARD_USES_UBOOT),true)
+        $(error "Please set BOARD_KERNEL_IMAGE_NAME to uImage")
+else ifeq ($(BOARD_USES_UNCOMPRESSED_BOOT),true)
+        $(error "Please set BOARD_KERNEL_IMAGE_NAME to Image")
+endif
 endif
 
 ifeq "$(wildcard $(KERNEL_SRC) )" ""
@@ -157,6 +188,8 @@ ifeq "$(wildcard $(KERNEL_SRC) )" ""
         $(warning * THIS IS DEPRECATED, AND WILL BE DISCONTINUED                *)
         $(warning * Please configure your device to download the kernel         *)
         $(warning * source repository to $(KERNEL_SRC))
+        $(warning * See http://wiki.cyanogenmod.org/w/Doc:_integrated_kernel_building)
+        $(warning * for more information                                        *)
         $(warning ***************************************************************)
         FULL_KERNEL_BUILD := false
         KERNEL_BIN := $(TARGET_PREBUILT_KERNEL)
@@ -199,21 +232,13 @@ KERNEL_HEADERS_INSTALL_DEPS := $(KERNEL_OUT)/.headers_install_deps
 ifeq ($(NEED_KERNEL_MODULE_ROOT),true)
 KERNEL_MODULES_INSTALL := root
 KERNEL_MODULES_OUT := $(TARGET_ROOT_OUT)/lib/modules
-KERNEL_DEPMOD_STAGING_DIR := $(call intermediates-dir-for,PACKAGING,depmod_recovery)
-KERNEL_MODULE_MOUNTPOINT :=
-else ifeq ($(NEED_KERNEL_MODULE_SYSTEM),true)
-KERNEL_MODULES_INSTALL := $(TARGET_COPY_OUT_SYSTEM)
-KERNEL_MODULES_OUT := $(TARGET_OUT)/lib/modules
-KERNEL_DEPMOD_STAGING_DIR := $(call intermediates-dir-for,PACKAGING,depmod_system)
-KERNEL_MODULE_MOUNTPOINT := system
 else
-KERNEL_MODULES_INSTALL := $(TARGET_COPY_OUT_VENDOR)
-KERNEL_MODULES_OUT := $(TARGET_OUT_VENDOR)/lib/modules
-KERNEL_DEPMOD_STAGING_DIR := $(call intermediates-dir-for,PACKAGING,depmod_vendor)
-KERNEL_MODULE_MOUNTPOINT := vendor
+KERNEL_MODULES_INSTALL := system
+KERNEL_MODULES_OUT := $(TARGET_OUT)/lib/modules
 endif
 
 TARGET_KERNEL_CROSS_COMPILE_PREFIX := $(strip $(TARGET_KERNEL_CROSS_COMPILE_PREFIX))
+TARGET_KERNEL_CLANG_VERSION := $(strip $(shell grep -r "ClangDefaultVersion "  build/soong/cc/config/global.go |sed -e 's#ClangDefaultVersion      = "##'g | sed 's/"//'))
 ifneq ($(TARGET_KERNEL_CROSS_COMPILE_PREFIX),)
 KERNEL_TOOLCHAIN_PREFIX ?= $(TARGET_KERNEL_CROSS_COMPILE_PREFIX)
 else ifeq ($(KERNEL_ARCH),arm64)
@@ -233,18 +258,21 @@ endif
 endif
 
 BUILD_TOP := $(shell pwd)
-
+# Initialize ccache  as an empty argument.
+ccache :=
+# Fill the ccache argument if USE_CCACHE is not set to false.
+ifneq ($(filter-out false,$(USE_CCACHE)),)
+    # Detect if the system already has ccache installed.
 ifeq ($(TARGET_KERNEL_CLANG_COMPILE),true)
     ifneq ($(TARGET_KERNEL_CLANG_VERSION),)
         # Find the clang-* directory containing the specified version
-        KERNEL_CLANG_VERSION := $(shell find $(BUILD_TOP)/prebuilts/clang/host/$(HOST_OS)-x86/ -name AndroidVersion.txt -exec grep -l $(TARGET_KERNEL_CLANG_VERSION) "{}" \; | sed -e 's|/AndroidVersion.txt$$||g;s|^.*/||g')
+        KERNEL_CLANG_VERSION := $(strip $(shell grep -r "ClangDefaultVersion "  build/soong/cc/config/global.go |sed -e 's#ClangDefaultVersion      = "##'g | sed 's/"//'))
     else
-        # Use the default version of clang if TARGET_KERNEL_CLANG_VERSION hasn't been set by the device config
-        KERNEL_CLANG_VERSION := $(LLVM_PREBUILTS_VERSION)
+        # Only set the latest version of clang if TARGET_KERNEL_CLANG_VERSION hasn't been set by the device config
+        KERNEL_CLANG_VERSION := $(shell ls -d $(BUILD_TOP)/prebuilts/clang/host/$(HOST_OS)-x86/clang-* | xargs -n 1 basename | tail -1)
     endif
+    $(info Using '$(KERNEL_CLANG_VERSION)' to compile)
     TARGET_KERNEL_CLANG_PATH ?= $(BUILD_TOP)/prebuilts/clang/host/$(HOST_OS)-x86/$(KERNEL_CLANG_VERSION)/bin
-    KBUILD_COMPILER_STRING := $(shell $(TARGET_KERNEL_CLANG_PATH)/clang --version | head -n 1 | sed -e 's/  */ /g')
-    #export KBUILD_COMPILER_STRING
     ifeq ($(KERNEL_ARCH),arm64)
         KERNEL_CLANG_TRIPLE ?= CLANG_TRIPLE=aarch64-linux-gnu-
     else ifeq ($(KERNEL_ARCH),arm)
@@ -253,15 +281,11 @@ ifeq ($(TARGET_KERNEL_CLANG_COMPILE),true)
         KERNEL_CLANG_TRIPLE ?= CLANG_TRIPLE=x86_64-linux-gnu-
     endif
 endif
+endif
 
-# Initialize ccache as an empty argument.
-ccache :=
-
-# Fill the ccache argument if USE_CCACHE is not set to false.
-ifneq ($(filter-out false,$(USE_CCACHE)),)
-    # Detect if the system already has ccache installed.
+ifneq ($(USE_CCACHE),)
+    # Detect if the system already has ccache installed to use instead of the prebuilt
     ccache := $(shell which ccache)
-
     # Use the prebuilt one if host doesn't have ccache installed.
     ifeq ($(ccache),)
         ccache := $(BUILD_TOP)/prebuilts/misc/$(HOST_PREBUILT_TAG)/ccache/ccache
@@ -279,8 +303,9 @@ endif
 ifeq ($(TARGET_KERNEL_CLANG_COMPILE),true)
     KERNEL_CROSS_COMPILE := CROSS_COMPILE="$(KERNEL_TOOLCHAIN_PATH)"
     PATH_OVERRIDE := PATH=$(TARGET_KERNEL_CLANG_PATH):$$PATH LD_LIBRARY_PATH=$(BUILD_TOP)/prebuilts/clang/host/$(HOST_OS)-x86/$(KERNEL_CLANG_VERSION)/lib64:$$LD_LIBRARY_PATH
+    TARGET_CROSS_COMPILE_ARM32 := CROSS_COMPILE_ARM32="$(TARGET_CROSS_COMPILE_ARM32)"
     ifeq ($(KERNEL_CC),)
-        KERNEL_CC := CC="$(ccache) clang"
+        KERNEL_CC := CC="$(ccache) $(TARGET_KERNEL_CLANG_PATH)/clang"
     endif
 else
     KERNEL_CROSS_COMPILE := CROSS_COMPILE="$(ccache) $(KERNEL_TOOLCHAIN_PATH)"
@@ -293,13 +318,37 @@ endif
 
 ccache =
 
+define mv-modules
+    mdpath=`find $(KERNEL_MODULES_OUT) -type f -name modules.order`;\
+    if [ "$$mdpath" != "" ];then\
+        mpath=`dirname $$mdpath`;\
+        ko=`find $$mpath/kernel -type f -name *.ko`;\
+        for i in $$ko; do $(KERNEL_TOOLCHAIN_PATH)strip --strip-unneeded $$i;\
+        mv $$i $(KERNEL_MODULES_OUT)/; done;\
+    fi
+endef
+
+define clean-module-folder
+    mdpath=`find $(KERNEL_MODULES_OUT) -type f -name modules.order`;\
+    if [ "$$mdpath" != "" ];then\
+        mpath=`dirname $$mdpath`; rm -rf $$mpath;\
+    fi
+endef
+
 ifeq ($(HOST_OS),darwin)
-  MAKE_FLAGS += C_INCLUDE_PATH=$(BUILD_TOP)/external/elfutils/0.153/libelf/
+  MAKE_FLAGS += C_INCLUDE_PATH=$(BUILD_TOP)/external/elfutils/libelf:/usr/local/opt/openssl/include
+  MAKE_FLAGS += LIBRARY_PATH=/usr/local/opt/openssl/lib
 endif
 
 ifeq ($(TARGET_KERNEL_MODULES),)
     TARGET_KERNEL_MODULES := INSTALLED_KERNEL_MODULES
 endif
+
+$(KERNEL_OUT_STAMP):
+	$(hide) mkdir -p $(KERNEL_OUT)
+	$(hide) rm -rf $(KERNEL_MODULES_OUT)
+	$(hide) mkdir -p $(KERNEL_MODULES_OUT)
+	$(hide) touch $@
 
 KERNEL_ADDITIONAL_CONFIG_OUT := $(KERNEL_OUT)/.additional_config
 
@@ -308,7 +357,7 @@ $(KERNEL_ADDITIONAL_CONFIG_OUT): force_additional_config
 	$(hide) cmp -s $(KERNEL_ADDITIONAL_CONFIG_SRC) $@ || cp $(KERNEL_ADDITIONAL_CONFIG_SRC) $@;
 
 $(KERNEL_CONFIG): $(KERNEL_DEFCONFIG_SRC) $(KERNEL_ADDITIONAL_CONFIG_OUT)
-	@echo "Building Kernel Config"
+	@echo -e ${CL_GRN}"Building Kernel Config"${CL_RST}
 	$(hide) mkdir -p $(KERNEL_OUT)
 	$(PATH_OVERRIDE) $(MAKE) $(MAKE_FLAGS) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(KERNEL_CLANG_TRIPLE) $(KERNEL_CC) VARIANT_DEFCONFIG=$(VARIANT_DEFCONFIG) SELINUX_DEFCONFIG=$(SELINUX_DEFCONFIG) $(KERNEL_DEFCONFIG)
 	$(hide) if [ ! -z "$(KERNEL_CONFIG_OVERRIDE)" ]; then \
@@ -324,24 +373,26 @@ $(KERNEL_CONFIG): $(KERNEL_DEFCONFIG_SRC) $(KERNEL_ADDITIONAL_CONFIG_OUT)
 
 .PHONY: TARGET_KERNEL_BINARIES
 TARGET_KERNEL_BINARIES: $(KERNEL_CONFIG)
-	@echo "Building Kernel"
+	@echo -e ${CL_GRN}"Building Kernel"${CL_RST}
 	$(hide) rm -rf $(KERNEL_MODULES_OUT)
 	$(hide) mkdir -p $(KERNEL_MODULES_OUT)
 	$(hide) rm -rf $(KERNEL_DEPMOD_STAGING_DIR)
 	$(PATH_OVERRIDE) $(MAKE) $(MAKE_FLAGS) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(KERNEL_CLANG_TRIPLE) $(KERNEL_CC) $(BOARD_KERNEL_IMAGE_NAME)
 	$(hide) if grep -q '^CONFIG_OF=y' $(KERNEL_CONFIG); then \
-			echo "Building DTBs"; \
+			echo -e ${CL_GRN}"Building DTBs"${CL_RST} ; \
 			$(PATH_OVERRIDE) $(MAKE) $(MAKE_FLAGS) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(KERNEL_CLANG_TRIPLE) $(KERNEL_CC) dtbs; \
 		fi
 	$(hide) if grep -q '^CONFIG_MODULES=y' $(KERNEL_CONFIG); then \
-			echo "Building Kernel Modules"; \
+			echo -e ${CL_GRN}"Building Kernel Modules"${CL_RST} ; \
 			$(PATH_OVERRIDE) $(MAKE) $(MAKE_FLAGS) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(KERNEL_CLANG_TRIPLE) $(KERNEL_CC) modules; \
 		fi
+	$(mv-modules)
+	$(clean-module-folder)
 
 .PHONY: INSTALLED_KERNEL_MODULES
-INSTALLED_KERNEL_MODULES: depmod-host
+INSTALLED_KERNEL_MODULES:
 	$(hide) if grep -q '^CONFIG_MODULES=y' $(KERNEL_CONFIG); then \
-			echo "Installing Kernel Modules"; \
+			echo -e ${CL_GRN}"Installing Kernel Modules"${CL_RST} ; \
 			$(PATH_OVERRIDE) $(MAKE) $(MAKE_FLAGS) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(KERNEL_CLANG_TRIPLE) $(KERNEL_CC) INSTALL_MOD_PATH=../../$(KERNEL_MODULES_INSTALL) modules_install && \
 			mofile=$$(find $(KERNEL_MODULES_OUT) -type f -name modules.order) && \
 			mpath=$$(dirname $$mofile) && \
@@ -349,16 +400,14 @@ INSTALLED_KERNEL_MODULES: depmod-host
 				$(KERNEL_TOOLCHAIN_PATH)strip --strip-unneeded $$f; \
 				mv $$f $(KERNEL_MODULES_OUT); \
 			done && \
-			rm -rf $$mpath && \
-			mkdir -p $(KERNEL_DEPMOD_STAGING_DIR)/lib/modules/0.0/$(KERNEL_MODULE_MOUNTPOINT)/lib/modules && \
-			find $(KERNEL_MODULES_OUT) -name *.ko -exec cp {} $(KERNEL_DEPMOD_STAGING_DIR)/lib/modules/0.0/$(KERNEL_MODULE_MOUNTPOINT)/lib/modules \; && \
-			$(DEPMOD) -b $(KERNEL_DEPMOD_STAGING_DIR) 0.0 && \
-			sed -e 's/\(.*modules.*\):/\/\1:/g' -e 's/ \([^ ]*modules[^ ]*\)/ \/\1/g' $(KERNEL_DEPMOD_STAGING_DIR)/lib/modules/0.0/modules.dep > $(KERNEL_MODULES_OUT)/modules.dep; \
+			rm -rf $$mpath; \
 		fi
 
 $(TARGET_KERNEL_MODULES): TARGET_KERNEL_BINARIES
 
 $(TARGET_PREBUILT_INT_KERNEL): $(TARGET_KERNEL_MODULES)
+	$(mv-modules)
+	$(clean-module-folder)
 
 # Install kernel (uapi) headers.
 #
@@ -376,7 +425,7 @@ $(TARGET_PREBUILT_INT_KERNEL): $(TARGET_KERNEL_MODULES)
 # as a part of the uapi system (commit d183e6f570f3).
 -include $(KERNEL_HEADERS_INSTALL_DEPS)
 $(KERNEL_HEADERS_INSTALL_DEPS):
-	@echo "Building Kernel Headers"
+	@echo -e ${CL_GRN}"Building Kernel Headers"${CL_RST}
 	$(hide) mkdir -p $(KERNEL_OUT)
 	$(hide) rm -f $@
 	$(hide) $(PATH_OVERRIDE) $(MAKE) $(MAKE_FLAGS) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(KERNEL_CLANG_TRIPLE) $(KERNEL_CC) headers_install
@@ -423,7 +472,7 @@ kernelxconfig kernelconfig:
 		 $(PATH_OVERRIDE) $(MAKE) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(KERNEL_CLANG_TRIPLE) $(KERNEL_CC) $(KERNELCONFIG_MODE)
 	env KCONFIG_NOTIMESTAMP=true \
 		 $(PATH_OVERRIDE) $(MAKE) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(KERNEL_CLANG_TRIPLE) $(KERNEL_CC) savedefconfig
-	cp $(KERNEL_OUT)/defconfig $(KERNEL_DEFCONFIG_SRC)
+	cp $(KERNEL_OUT)/defconfig $(KERNEL_SRC)/arch/$(KERNEL_ARCH)/configs/$(KERNEL_DEFCONFIG)
 
 kernelsavedefconfig:
 	$(hide) mkdir -p $(KERNEL_OUT)
@@ -482,4 +531,3 @@ kernel: $(INSTALLED_KERNEL_TARGET)
 .PHONY: dtbo
 dtbo: $(INSTALLED_DTBOIMAGE_TARGET)
 
-endif # TARGET_NO_KERNEL

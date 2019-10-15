@@ -20,10 +20,13 @@
 #
 # These config vars are usually set in BoardConfig.mk:
 #
+#   TARGET_KERNEL_SOURCE               = Kernel source dir, optional, defaults
+#                                        to kernel/$(TARGET_DEVICE_DIR)
 #   TARGET_KERNEL_CONFIG               = Kernel defconfig
 #   TARGET_KERNEL_VARIANT_CONFIG       = Variant defconfig, optional
 #   TARGET_KERNEL_SELINUX_CONFIG       = SELinux defconfig, optional
 #   TARGET_KERNEL_ADDITIONAL_CONFIG    = Additional defconfig, optional
+#   TARGET_KERNEL_ARCH                 = Kernel Arch
 #   TARGET_KERNEL_CROSS_COMPILE_PREFIX = Compiler prefix (e.g. arm-eabi-)
 #                                          defaults to arm-linux-androidkernel- for arm
 #                                                      aarch64-linux-androidkernel- for arm64
@@ -69,7 +72,11 @@
 
 ifneq ($(TARGET_NO_KERNEL),true)
 
+TARGET_AUTO_KDIR := $(shell echo $(TARGET_DEVICE_DIR) | sed -e 's/^device/kernel/g')
+
 ## Externally influenced variables
+# kernel location - optional, defaults to kernel/<vendor>/<device>
+TARGET_KERNEL_SOURCE ?= $(TARGET_AUTO_KDIR)
 KERNEL_SRC := $(TARGET_KERNEL_SOURCE)
 # kernel configuration - mandatory
 KERNEL_DEFCONFIG := $(TARGET_KERNEL_CONFIG)
@@ -80,6 +87,12 @@ SELINUX_DEFCONFIG := $(TARGET_KERNEL_SELINUX_CONFIG)
 KERNEL_OUT := $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ
 KERNEL_CONFIG := $(KERNEL_OUT)/.config
 
+TARGET_KERNEL_ARCH := $(strip $(TARGET_KERNEL_ARCH))
+ifeq ($(TARGET_KERNEL_ARCH),)
+KERNEL_ARCH := $(TARGET_ARCH)
+else
+KERNEL_ARCH := $(TARGET_KERNEL_ARCH)
+endif
 KERNEL_DEFCONFIG_SRC := $(KERNEL_SRC)/arch/$(KERNEL_ARCH)/configs/$(KERNEL_DEFCONFIG)
 
 ifeq ($(KERNEL_ARCH),x86_64)
@@ -179,6 +192,9 @@ else
 endif
 
 ifeq ($(FULL_KERNEL_BUILD),true)
+
+KERNEL_HEADERS_INSTALL_DIR := $(KERNEL_OUT)/usr
+KERNEL_HEADERS_INSTALL_DEPS := $(KERNEL_OUT)/.headers_install_deps
 
 ifeq ($(NEED_KERNEL_MODULE_ROOT),true)
 KERNEL_MODULES_INSTALL := root
@@ -312,10 +328,8 @@ $(TARGET_PREBUILT_INT_KERNEL): $(KERNEL_CONFIG)
 			echo "Building DTBs"; \
 			$(PATH_OVERRIDE) $(MAKE) $(MAKE_FLAGS) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(KERNEL_CLANG_TRIPLE) $(KERNEL_CC) dtbs; \
 		fi
-	$(hide) if grep -q '^CONFIG_MODULES=y' $(KERNEL_CONFIG); then \
 			echo "Building Kernel Modules"; \
 			$(PATH_OVERRIDE) $(MAKE) $(MAKE_FLAGS) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(KERNEL_CLANG_TRIPLE) $(KERNEL_CC) modules; \
-		fi
 
 .PHONY: INSTALLED_KERNEL_MODULES
 INSTALLED_KERNEL_MODULES: depmod-host
@@ -336,6 +350,53 @@ INSTALLED_KERNEL_MODULES: depmod-host
 		fi
 
 $(TARGET_KERNEL_MODULES): $(TARGET_PREBUILT_INT_KERNEL)
+
+# Install kernel (uapi) headers.
+#
+# The dependency file serves two purposes:
+#  - It is a stamp indicating when the headers were last installed.
+#  - It contains a rule to regenerate itself when any kernel header
+#    files change.  This rule is identical to the rule emitted by
+#    GCC using the M/MM flags.
+#
+# Note that the location of installed kernel headers changed when the
+# kernel uapi system was introduced in 3.7.  Unfortunately, it is not
+# sufficient to test whether the uapi directories exist because some
+# kernels backport patches that contain uapi headers.  So we look for
+# the string "version_h" in the kernel makefile which was introduced
+# as a part of the uapi system (commit d183e6f570f3).
+-include $(KERNEL_HEADERS_INSTALL_DEPS)
+$(KERNEL_HEADERS_INSTALL_DEPS):
+	@echo "Building Kernel Headers"
+	$(hide) mkdir -p $(KERNEL_OUT)
+	$(hide) rm -f $@
+	$(hide) $(PATH_OVERRIDE) $(MAKE) $(MAKE_FLAGS) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(KERNEL_CLANG_TRIPLE) $(KERNEL_CC) headers_install
+	$(hide) echo "$@: \\" > $@
+	$(hide) ( cd $(KERNEL_SRC); \
+		if grep -q '^version_h' 'Makefile'; then \
+			depdirs="arch/$(KERNEL_ARCH)/include/uapi include/uapi"; \
+		else \
+			depdirs="arch/$(KERNEL_ARCH)/include/asm include"; \
+		fi; \
+		deps="Makefile $$(find $$depdirs -type f -name '*.h')"; \
+		for f in $$deps; do \
+			echo "  $(KERNEL_SRC)/$$f \\" >> $@; \
+		done ; \
+		echo "" >> $@ ; \
+		for f in $$deps; do \
+			echo "$(KERNEL_SRC)/$$f:" >> $@; \
+			echo "" >> $@; \
+		done \
+		)
+
+.PHONY: INSTALLED_KERNEL_HEADERS
+INSTALLED_KERNEL_HEADERS: $(KERNEL_HEADERS_INSTALL_DEPS)
+
+# Dependencies on $(KERNEL_OUT)/usr are deprecated
+$(KERNEL_HEADERS_INSTALL_DIR): $(KERNEL_HEADERS_INSTALL_DEPS)
+	@echo "Depending on $(KERNEL_HEADERS_INSTALL_DIR) is deprecated." 1>&2
+	@echo "Use INSTALLED_KERNEL_HEADERS instead." 1>&2
+	@exit 1
 
 .PHONY: kerneltags
 kerneltags: $(KERNEL_CONFIG)
@@ -384,6 +445,17 @@ $(TARGET_PREBUILT_DTBO):
 	$(PATH_OVERRIDE) $(MAKE) $(MAKE_FLAGS) -C $(KERNEL_SRC) O=$(PRODUCT_OUT)/dtbo ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(KERNEL_CLANG_TRIPLE) $(KERNEL_CC) $(KERNEL_DEFCONFIG)
 	$(PATH_OVERRIDE) $(MAKE) $(MAKE_FLAGS) -C $(KERNEL_SRC) O=$(PRODUCT_OUT)/dtbo ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(KERNEL_CLANG_TRIPLE) $(KERNEL_CC) dtbo.img
 endif #BOARD_AVB_ENABLE
+
+DTB_DIR := $(KERNEL_OUT)/arch/$(KERNEL_ARCH)/boot/dts
+TARGET_PREBUILT_DTB = $(KERNEL_OUT)/arch/$(KERNEL_ARCH)/boot/dts/dtb.img
+$(TARGET_PREBUILT_DTB): $(sort $(wildcard $(DTB_DIR)/*/*.dtb))
+	echo -e ${CL_GRN}"Building DTB.img"${CL_RST} \
+        cat  $^ >> $@; \
+        mv $@ $(PRODUCT_OUT)/dtb.img;
+#	dtc -I dtb -O dtb -a 4 $^ >> $@; \
+	mv $@ $(PRODUCT_OUT)/dtb.img;
+
+
 endif # FULL_KERNEL_BUILD
 
 ## Install it
@@ -406,10 +478,22 @@ $(file) : $(TARGET_PREBUILT_DTBO) | $(ACP)
 ALL_PREBUILT += $(INSTALLED_DTBOIMAGE_TARGET)
 endif
 
+ifeq ($(TARGET_NEEDS_DTBIMAGE),true)
+file := $(INSTALLED_DTBIMAGE_TARGET)
+ALL_PREBUILT += $(file)
+$(file) : $(TARGET_PREBUILT_DTB) | $(ACP)
+        $(transform-prebuilt-to-target)
+
+ALL_PREBUILT += $(INSTALLED_DTBIMAGE_TARGET)
+endif
+
 .PHONY: kernel
 kernel: $(INSTALLED_KERNEL_TARGET) $(TARGET_KERNEL_MODULES)
 
 .PHONY: dtbo
 dtbo: $(INSTALLED_DTBOIMAGE_TARGET)
+
+.PHONY: dtb
+dtb: $(INSTALLED_DTBIMAGE_TARGET)
 
 endif # TARGET_NO_KERNEL
